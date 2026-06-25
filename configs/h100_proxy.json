@@ -1,5 +1,5 @@
 {
-  "_comment": "Proxy proof-test: ~100M params, fast iteration on H100. Stage 1.",
+  "_comment": "Proxy proof-test: ~100M params on H100. total_steps 10->300: train the model properly under the existing Muon+QK-norm recipe for a decisively lower val_bpb at modest extra compute.",
   "vocab_size": 50257,
   "dim": 768,
   "n_layers": 12,
@@ -10,7 +10,7 @@
   "seq_len": 1024,
   "batch_size": 64,
   "micro_batch_size": 32,
-  "total_steps": 10,
+  "total_steps": 300,
   "warmup_steps": 50,
   "max_lr": 1e-5,
   "min_lr": 6e-5,
