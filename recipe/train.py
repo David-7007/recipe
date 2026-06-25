@@ -310,10 +310,15 @@ def train(cfg: TrainConfig, out_dir: Path, use_wandb: bool = False) -> dict:
             "tokens_per_sec": tok_per_s,
             "elapsed_s": elapsed,
         }
-        log_f.write(json.dumps(entry) + "\n")
         if wb_run:
             wb_run.log(entry, step=step)
         if step % cfg.log_every == 0 or step == cfg.total_steps - 1:
+            # Write the structured log only at log_every cadence (not every step):
+            # the proof-test attestation buckets this log into per-epoch records,
+            # so a 1500-step every-step log => ~150 epochs => very slow per-epoch
+            # NRAS attestation. Logging every log_every keeps it to a handful of
+            # epochs. Training/model are unchanged.
+            log_f.write(json.dumps(entry) + "\n")
             print(
                 f"[step {step:4d}/{cfg.total_steps}] loss={step_loss:.4f} lr={lr:.2e} "
                 f"|g|={grad_norm:.2f} tok/s={tok_per_s:,.0f}"
