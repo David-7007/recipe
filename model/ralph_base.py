@@ -32,10 +32,13 @@ class RalphConfig:
     head_dim: int = 64
     ffn_mult: float = 8 / 3  # Llama-style
     max_seq_len: int = 1024
-    rope_base: float = 10_000.0
+    rope_base: float = 100_000.0  # recipe-v4: RoPE-100k (was 10k)
     rms_norm_eps: float = 1e-5
     init_std: float = 0.02
     tie_embeddings: bool = True
+    qk_norm: bool = False  # per-head RMSNorm on q,k before RoPE (off => no q_norm/k_norm params)
+    unet_skip: bool = True        # recipe-v4: U-Net learnable skip connections
+    logit_softcap: float = 30.0   # recipe-v4: tanh soft-cap on logits (0 = off)
 
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -99,8 +102,10 @@ class Attention(nn.Module):
         # attention-logit scale so it can't drift, which is especially important
         # under the Muon optimizer's aggressive orthogonalized updates (see
         # recipe/train.py). Strong synergy with Muon; standard in modern speedruns.
-        self.q_norm = RMSNorm(cfg.head_dim, cfg.rms_norm_eps)
-        self.k_norm = RMSNorm(cfg.head_dim, cfg.rms_norm_eps)
+        self.qk_norm = getattr(cfg, "qk_norm", False)
+        if self.qk_norm:
+            self.q_norm = RMSNorm(cfg.head_dim, cfg.rms_norm_eps)
+            self.k_norm = RMSNorm(cfg.head_dim, cfg.rms_norm_eps)
 
     def forward(self, x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape
@@ -109,8 +114,9 @@ class Attention(nn.Module):
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, T, hd)
         k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        q = self.q_norm(q)  # QK-norm (per head_dim, before RoPE)
-        k = self.k_norm(k)
+        if self.qk_norm:
+            q = self.q_norm(q)  # QK-norm (per head_dim, before RoPE)
+            k = self.k_norm(k)
         q = apply_rope(q, rope_cache)
         k = apply_rope(k, rope_cache)
         # Causal self-attention via SDPA (uses flash on supported hardware).
@@ -160,6 +166,11 @@ class RalphBase(nn.Module):
         self.cfg = cfg
         self.tok_embed = nn.Embedding(cfg.vocab_size, cfg.dim)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
+        # recipe-v4: U-Net skips — one learnable gate per decoder layer, 0-init
+        # (starts identical to canonical, learns to use the skips).
+        self.unet_skip = getattr(cfg, "unet_skip", False)
+        if self.unet_skip:
+            self.skip_gate = nn.Parameter(torch.zeros(cfg.n_layers - cfg.n_layers // 2))
         self.final_norm = RMSNorm(cfg.dim, cfg.rms_norm_eps)
         if cfg.tie_embeddings:
             self.lm_head = None
@@ -194,13 +205,25 @@ class RalphBase(nn.Module):
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert idx.shape[-1] <= self.cfg.max_seq_len, f"sequence {idx.shape[-1]} exceeds max_seq_len {self.cfg.max_seq_len}"
         x = self.tok_embed(idx)
-        for block in self.blocks:
-            x = block(x, self.rope_cache)
+        if self.unet_skip:
+            n = len(self.blocks); half = n // 2; enc = []
+            for i, block in enumerate(self.blocks):
+                if i < half:
+                    x = block(x, self.rope_cache); enc.append(x)
+                else:
+                    x = x + self.skip_gate[i - half] * enc[n - 1 - i]
+                    x = block(x, self.rope_cache)
+        else:
+            for block in self.blocks:
+                x = block(x, self.rope_cache)
         x = self.final_norm(x)
         if self.lm_head is None:
             logits = F.linear(x, self.tok_embed.weight)
         else:
             logits = self.lm_head(x)
+        cap = getattr(self.cfg, "logit_softcap", 0.0)  # recipe-v4: logit soft-cap
+        if cap and cap > 0:
+            logits = cap * torch.tanh(logits / cap)
         loss = None
         if targets is not None:
             loss = F.cross_entropy(

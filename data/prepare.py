@@ -144,10 +144,10 @@ def tokenize_into_shards(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", choices=["synthetic", "fineweb-edu"], default="synthetic")
+    p.add_argument("--source", choices=["synthetic", "fineweb-edu"], default="fineweb-edu")
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--shard-tokens", type=int, default=100_000)
-    p.add_argument("--total-tokens", type=int, default=500_000)
+    p.add_argument("--shard-tokens", type=int, default=20_000_000)
+    p.add_argument("--total-tokens", type=int, default=1_000_000_000)
     p.add_argument("--eval-tokens", type=int, default=0,
                    help="Hold out this many tokens from the end for the hidden eval set")
     p.add_argument("--eval-out", type=Path, default=None,
