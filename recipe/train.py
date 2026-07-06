@@ -121,7 +121,7 @@ def set_determinism(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.use_deterministic_algorithms(False)
     except Exception:
         pass
     torch.backends.cudnn.deterministic = True
@@ -468,6 +468,15 @@ def train(cfg: TrainConfig, out_dir: Path, use_wandb: bool = False) -> dict:
     ckpt_path = out_dir / "checkpoint.pt"
     torch.save({"model": model.state_dict(), "config": asdict(cfg)}, ckpt_path)
 
+    _cfg_rec = asdict(cfg)
+    try:
+        _abp = Path(cfg.data_base_dir).resolve()
+        _amp = Path(cfg.manifest_path).resolve()
+        if _abp.is_absolute() and _abp.name and _amp == _abp / _amp.name:
+            _cfg_rec["data_base_dir"] = _abp.name
+            _cfg_rec["manifest_path"] = f"{_abp.name}/{_amp.name}"
+    except (ValueError, OSError, TypeError):
+        pass
     summary = {
         "steps": cfg.total_steps,
         "final_loss": last_loss,
@@ -479,7 +488,7 @@ def train(cfg: TrainConfig, out_dir: Path, use_wandb: bool = False) -> dict:
         "device": str(device),
         "precision": "bf16" if use_amp else "fp32",
         "wandb_url": wb_url,
-        "config": asdict(cfg),
+        "config": _cfg_rec,
     }
     (out_dir / "final_state.json").write_text(json.dumps(summary, indent=2))
     print(f"[train] done. final loss={last_loss:.4f} wall={summary['wall_clock_s']:.1f}s")
