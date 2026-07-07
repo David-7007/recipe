@@ -15,6 +15,7 @@ confirmation / scale proof-test variants.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -181,6 +182,10 @@ class RalphBase(nn.Module):
             precompute_rope_cache(cfg.head_dim, cfg.max_seq_len, cfg.rope_base, torch.device("cpu")),
             persistent=False,
         )
+        # Lazily-populated compiled forward (a torch.compile'd BOUND METHOD, i.e. a
+        # plain function, NOT an nn.Module) -- kept out of _modules/state_dict so op4
+        # strict-load stays byte-identical. None until the first CUDA forward.
+        self._compiled_fwd = None
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -203,6 +208,22 @@ class RalphBase(nn.Module):
         return n
 
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Route through a lazily-compiled BOUND METHOD (self._forward_impl). Compiling
+        # a bound method returns a plain function (NOT an nn.Module), so it never enters
+        # _modules and the saved state_dict is byte-identical (no "_orig_mod." prefix ->
+        # op4 strict-load safe). Gated on CUDA + RALPH_NO_COMPILE != "1"; falls back to eager.
+        fwd = self._compiled_fwd
+        if fwd is None:
+            fwd = self._forward_impl
+            if idx.is_cuda and os.environ.get("RALPH_NO_COMPILE") != "1":
+                try:
+                    fwd = torch.compile(self._forward_impl)
+                except Exception:
+                    fwd = self._forward_impl
+            self._compiled_fwd = fwd
+        return fwd(idx, targets)
+
+    def _forward_impl(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert idx.shape[-1] <= self.cfg.max_seq_len, f"sequence {idx.shape[-1]} exceeds max_seq_len {self.cfg.max_seq_len}"
         x = self.tok_embed(idx)
         if self.unet_skip:
